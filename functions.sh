@@ -150,13 +150,13 @@ prepare_environment() {
 	echo_broadcast "==> Determining root drive"
 	find_root_drive
 	echo_broadcast "====> Root drive identified at [${root_drive}]"
-	boot_drive=${root_drive%?}1
+	boot_drive=${root_drive%?}6
 	echo_broadcast "==> Boot Drive [${boot_drive}]"
 	echo_broadcast "==> Figuring out Source and Destination devices"
-	if [ "x${boot_drive}" = "x/dev/mmcblk0p1" ] ; then
+	if [ "x${boot_drive}" = "x/dev/mmcblk0p6" ] ; then
 		source="/dev/mmcblk0"
 		destination="/dev/mmcblk1"
-	elif [ "x${boot_drive}" = "x/dev/mmcblk1p1" ] ; then
+	elif [ "x${boot_drive}" = "x/dev/mmcblk1p6" ] ; then
 		source="/dev/mmcblk1"
 		destination="/dev/mmcblk0"
 	else
@@ -182,7 +182,7 @@ prepare_environment() {
 		echo_broadcast "====> Mounting ${boot_drive} Read Only over /boot/uboot"
 		mount ${boot_drive} /boot/uboot -o ro || try_vfat
 	fi
-
+  mount -a
 	generate_line 80 '='
 }
 
@@ -333,7 +333,7 @@ find_root_drive(){
 		proc_cmdline=$(cat /proc/cmdline | tr -d '\000')
 		echo_broadcast "==> ${proc_cmdline}"
 		generate_line 40
-		root_drive=$(cat /proc/cmdline | tr -d '\000' | sed 's/ /\n/g' | grep root=UUID= | awk -F 'root=' '{print $2}' || true)
+		root_drive=$(cat /proc/cmdline | tr -d '\000' | sed 's/ /\n/g' | grep root=PARTUUID= | awk -F 'root=' '{print $2}' || true)
 		if [ ! "x${root_drive}" = "x" ] ; then
 			root_drive=$(/sbin/findfs ${root_drive} || true)
 		else
@@ -412,6 +412,10 @@ get_device() {
     TI_AM5728_BeagleBoard*)
       unset is_bbb
       ;;
+    RK3229_ReSpeaker_Board*)
+      is_respeaker="enable"
+      unset is_bbb
+      ;;  
   esac
 }
 
@@ -434,8 +438,23 @@ reset_leds() {
       echo $leds_pattern2 > ${leds_base}2/trigger
       echo $leds_pattern3 > ${leds_base}3/trigger
     fi
+  elif [ "x${is_respeaker}" = "xenable" ] ; then
+    unset local leds_base
+    unset leds_pattern0
+    unset leds_pattern3
+    local leds_base=/sys/class/leds/respeaker2\:blue\:state
+    if [ -e /proc/$CYLON_PID ]; then
+      echo_broadcast "==> Stopping Cylon LEDs ..."
+      kill $CYLON_PID > /dev/null 2>&1
+    fi
+
+    if [ -e ${leds_base}1/trigger ] ; then
+      echo_broadcast "==> Setting LEDs to ${leds_pattern1}"
+      echo $leds_pattern1 > ${leds_base}1/trigger
+      echo $leds_pattern2 > ${leds_base}2/trigger
+    fi
   else
-    echo_broadcast "!==> We don't know how to reset the leds as we are not a BBB compatible device"
+    echo_broadcast "!==> We don't know how to reset the leds as we are not a BBB or respeaker compatible device"
   fi
 }
 
@@ -738,6 +757,35 @@ cylon_leds() {
       done
     fi
   fi
+  if [ "x${is_respeaker}" = "xenable" ] ; then
+    if [ -e /sys/class/leds/respeaker2\:blue\:state1/trigger ] ; then
+      BASE=/sys/class/leds/respeaker2\:blue\:state
+      echo none > ${BASE}1/trigger
+      echo none > ${BASE}2/trigger
+
+      STATE=1
+      while : ; do
+        case $STATE in
+          1)
+            echo 255 > ${BASE}1/brightness
+            echo 0   > ${BASE}2/brightness
+            STATE=2
+            ;;
+          2)
+            echo 255 > ${BASE}2/brightness
+            echo 0   > ${BASE}1/brightness
+            STATE=1
+            ;;
+          *)
+            echo 255 > ${BASE}1/brightness
+            echo 0   > ${BASE}2/brightness
+            STATE=1
+            ;;
+        esac
+        sleep 0.1
+      done
+    fi
+  fi  
 }
 
 _build_uboot_spl_dd_options() {
@@ -801,6 +849,27 @@ _dd_bootloader() {
   echo_broadcast "Writing bootloader completed"
   generate_line 80 '='
 }
+_dd_v2_bootloader() {
+  empty_line
+  generate_line 80 '='
+  echo_broadcast "Writing bootloader to [${destination}]"
+  generate_line 40
+  media_prefix=${destination}p
+  
+	echo_broadcast "dd if=/opt/backup/uboot/${idbloader_name} of=${media_prefix}${media_idbloader_partition} conv=notrunc"
+	dd if=/opt/backup/uboot/${idbloader_name} of=${media_prefix}${media_idbloader_partition} conv=notrunc
+
+	echo_broadcast "dd if=/opt/backup/uboot/${atf_name} of=${media_prefix}${media_atf_partition} conv=notrunc"
+	dd if=/opt/backup/uboot/${atf_name} of=${media_prefix}${media_atf_partition} conv=notrunc
+
+	echo_broadcast "dd if=$/opt/backup/uboot/${uboot_name} of=${media_prefix}${media_uboot_partition} conv=notrunc"
+	dd if=/opt/backup/uboot/${uboot_name} of=${media_prefix}${media_uboot_partition} conv=notrunc
+
+  generate_line 60
+  echo_broadcast "Writing bootloader completed"
+  generate_line 80 '='
+}
+
 
 _format_boot() {
   empty_line
@@ -814,10 +883,10 @@ _format_boot() {
 
 _format_root() {
   empty_line
-  echo_broadcast "==> Formatting rootfs with mkfs.ext4 ${ext4_options} ${rootfs_partition} -L ${rootfs_label}"
+  echo_broadcast "==> Formatting rootfs with mkfs.ext4 ${ext4_options} -F ${rootfs_partition} -L ${rootfs_label}"
   generate_line 80
   empty_line
-  LC_ALL=C mkfs.ext4 ${ext4_options} ${rootfs_partition} -L ${rootfs_label}
+  LC_ALL=C mkfs.ext4 ${ext4_options} -F ${rootfs_partition} -L ${rootfs_label}
   generate_line 80
   echo_broadcast "==> Formatting rootfs: ${rootfs_partition} complete"
   flush_cache
@@ -841,13 +910,21 @@ _copy_boot() {
 		fi
 	fi
 
-	if [ -f /boot/uboot/MLO ] ; then
-		echo_broadcast "==> rsync: /boot/uboot/ -> ${tmp_boot_dir}"
+	if [ -f /boot/uEnv.txt ] ; then
+		echo_broadcast "==> rsync: /boot/ -> ${tmp_boot_dir}"
 		get_rsync_options
-		rsync -aAxv $rsync_options /boot/uboot/* ${tmp_boot_dir} --exclude={MLO,u-boot.img,uEnv.txt} || write_failure
+		rsync -aAxv $rsync_options /boot/* ${tmp_boot_dir} || write_failure
 		flush_cache
 		empty_line
 		generate_line 80 '='
+
+    #FIXME: What about when you boot from a fat partition /boot ?
+    echo_broadcast "==> /boot/uEnv.txt: disabling eMMC flasher script"
+    sed -i -e 's/cmdline=init/#cmdline=init/g' ${tmp_boot_dir}/uEnv.txt
+    generate_line 40 '*'
+    cat ${tmp_boot_dir}/uEnv.txt
+    generate_line 40 '*'
+    flush_cache    
 	fi
 }
 
@@ -923,36 +1000,14 @@ _generate_fstab() {
 	echo "# /etc/fstab: static file system information." > ${tmp_rootfs_dir}/etc/fstab
 	echo "#" >> ${tmp_rootfs_dir}/etc/fstab
 	if [ "${boot_partition}x" != "${rootfs_partition}x" ] ; then
-
-		#UUID support for 3.8.x kernel
-		if [ -d /sys/devices/bone_capemgr.*/ ] ; then
-			boot_fs_id=$(get_fstab_id_for_device ${boot_partition})
-			echo "${boot_fs_id} /boot/uboot auto defaults 0 0" >> ${tmp_rootfs_dir}/etc/fstab
-		else
-			echo "${boot_partition} /boot/uboot auto defaults 0 0" >> ${tmp_rootfs_dir}/etc/fstab
-		fi
+    echo "LABEL=EMMC_BOOT      /boot vfat   rw,relatime,fmask=0022,dmask=0022,codepage=437,iocharset=iso8859-1,shortname=mixed,errors=remount-ro 0      2" >> ${tmp_rootfs_dir}/etc/fstab
 
 	fi
-
-	#UUID support for 3.8.x kernel
-	if [ -d /sys/devices/bone_capemgr.*/ ] ; then
-		root_fs_id=$(get_fstab_id_for_device ${rootfs_partition})
-		echo "${root_fs_id}  /  ext4  noatime,errors=remount-ro  0  1" >> ${tmp_rootfs_dir}/etc/fstab
-	else
-		echo "${rootfs_partition}  /  ext4  noatime,errors=remount-ro  0  1" >> ${tmp_rootfs_dir}/etc/fstab
-	fi
-
-	echo "debugfs  /sys/kernel/debug  debugfs  defaults  0  0" >> ${tmp_rootfs_dir}/etc/fstab
 	echo_broadcast "===> /etc/fstab generated"
 	generate_line 40 '*'
 	cat ${tmp_rootfs_dir}/etc/fstab
 	generate_line 40 '*'
 	empty_line
-
-	#UUID support for 3.8.x kernel
-	if [ ! -d /sys/devices/bone_capemgr.*/ ] ; then
-		sed -i -e 's:^uuid=:#uuid=:g' ${tmp_rootfs_dir}/boot/uEnv.txt
-	fi
 }
 
 _copy_rootfs() {
@@ -987,17 +1042,9 @@ _copy_rootfs() {
     touch ${tmp_rootfs_dir}/etc/ssh/ssh.regenerate
     flush_cache
   fi
-
-  _generate_uEnv ${tmp_rootfs_dir}/boot/uEnv.txt
-
+  
   _generate_fstab
 
-  #FIXME: What about when you boot from a fat partition /boot ?
-  echo_broadcast "==> /boot/uEnv.txt: disabling eMMC flasher script"
-  sed -i -e 's:'$emmcscript':#'$emmcscript':g' ${tmp_rootfs_dir}/boot/uEnv.txt
-  generate_line 40 '*'
-  cat ${tmp_rootfs_dir}/boot/uEnv.txt
-  generate_line 40 '*'
   flush_cache
 }
 
@@ -1292,6 +1339,52 @@ __EOF__
   fi
   #TODO: Rework this for supporting a more complex partition layout
 }
+partition_v2_device() {
+  empty_line
+  generate_line 80 '='
+  echo_broadcast "Partitionning ${destination}"
+  generate_line 40
+	if [ "${conf_board}" = "respeaker_v2" ] ; then
+		reserved1_start=$(expr ${idbloader_start} + ${idbloader_size})
+		reserved2_start=$(expr ${reserved1_start} + ${reserved1_size})
+		uboot_start=$(expr ${reserved2_start} + ${reserved2_size})
+		atf_start=$(expr ${uboot_start} + ${uboot_size})
+		boot_start=$(expr ${atf_start} + ${atf_size})
+		rootfs_start=$(expr ${boot_start} + ${boot_size})
+
+		echo_broadcast "parted -s ${destination} mklabel gpt"
+		parted -s ${destination} mklabel gpt
+		
+		echo_broadcast "parted -s ${destination} unit s mkpart loader1 ${idbloader_start} $(expr ${reserved1_start} - 1)"
+		parted -s ${destination} unit s mkpart loader1 ${idbloader_start} $(expr ${reserved1_start} - 1)
+		
+		echo_broadcast "parted -s ${destination} unit s mkpart reserved1 ${reserved1_start} $(expr ${reserved2_start} - 1)"
+		parted -s ${destination} unit s mkpart reserved1 ${reserved1_start} $(expr ${reserved2_start} - 1)
+
+		echo_broadcast "parted -s ${destination} unit s mkpart reserved2 ${reserved2_start} $(expr ${uboot_start} - 1)"
+		parted -s ${destination} unit s mkpart reserved2 ${reserved2_start} $(expr ${uboot_start} - 1)
+
+		echo_broadcast "parted -s ${destination} unit s mkpart loader2 ${uboot_start} $(expr ${atf_start} - 1)"
+		parted -s ${destination} unit s mkpart loader2 ${uboot_start} $(expr ${atf_start} - 1)
+
+		echo_broadcast "parted -s ${destination} unit s mkpart atf ${atf_start} $(expr ${boot_start} - 1)"
+		parted -s ${destination} unit s mkpart atf ${atf_start} $(expr ${boot_start} - 1)
+
+		echo_broadcast "parted -s ${destination} unit s mkpart EMMC_BOOT ${boot_start} $(expr ${rootfs_start} - 1)"
+		parted -s ${destination} unit s mkpart EMMC_BOOT ${boot_start} $(expr ${rootfs_start} - 1)
+
+		echo_broadcast "parted -s ${destination} set 6 boot on"
+		parted -s ${destination} set 6 boot on
+
+		echo_broadcast "parted -s ${destination} unit s mkpart root ${rootfs_start} 100%"
+		parted -s ${destination} unit s mkpart root ${rootfs_start} 100%
+
+    boot_label="EMMC_BOOT"
+    rootfs_label="rootfs"
+	fi  
+
+
+}
 
 _prepare_future_boot() {
   empty_line
@@ -1356,11 +1449,51 @@ prepare_drive() {
 
   get_ext4_options
 
-  _dd_bootloader
+  _dd_v2_bootloader
 
   boot_partition=
   rootfs_partition=
   partition_device
+
+  if [ "${boot_partition}x" != "${rootfs_partition}x" ] ; then
+    tmp_boot_dir="/tmp/boot"
+    _prepare_future_boot
+    _copy_boot
+    _teardown_future_boot
+
+    tmp_rootfs_dir="/tmp/rootfs"
+    _prepare_future_rootfs
+    media_rootfs="7"
+    _copy_rootfs
+    _teardown_future_rootfs
+  else
+    rootfs_label=${boot_label}
+    tmp_rootfs_dir="/tmp/rootfs"
+    _prepare_future_rootfs
+    media_rootfs="1"
+    _copy_rootfs
+    _teardown_future_rootfs
+  fi
+  teardown_environment
+  end_script
+}
+
+prepare_v2_drive() {
+  empty_line
+  generate_line 80 '='
+  echo_broadcast "Preparing drives"
+  erasing_drive ${destination}
+
+  loading_soc_defaults
+  get_ext4_options
+
+
+  boot_partition="${destination}p6"
+  rootfs_partition="${destination}p7"
+  partition_v2_device
+
+  _dd_v2_bootloader
+
 
   if [ "${boot_partition}x" != "${rootfs_partition}x" ] ; then
     tmp_boot_dir="/tmp/boot"
@@ -1384,6 +1517,7 @@ prepare_drive() {
   teardown_environment
   end_script
 }
+
 
 prepare_drive_reverse() {
   empty_line
@@ -1423,6 +1557,7 @@ prepare_drive_reverse() {
   end_script
 }
 
+
 startup_message(){
   clear
   generate_line 80 '='
@@ -1433,7 +1568,7 @@ startup_message(){
 }
 
 activate_cylon_leds() {
-  if [ "x${is_bbb}" = "xenable" ] ; then
+  if [ "x${is_bbb}" = "xenable" ] || [ "x${is_respeaker}" = "xenable" ]; then
     cylon_leds & CYLON_PID=$!
   else
     echo "Not activating Cylon LEDs as we are not a BBB compatible device"
