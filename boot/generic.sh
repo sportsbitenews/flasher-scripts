@@ -21,6 +21,10 @@
 # THE SOFTWARE.
 
 #Just Cleanup /etc/issue, systemd starts up tty before these are updated...
+if [ -f /lib/systemd/system/capemgr.service ] ; then
+	systemctl disable capemgr.service
+	systemctl stop capemgr.service
+fi
 sed -i -e '/Address/d' /etc/issue || true
 
 #
